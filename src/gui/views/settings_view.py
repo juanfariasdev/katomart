@@ -1,6 +1,6 @@
 from dataclasses import replace
 
-from PySide6.QtCore import Signal, QUrl
+from PySide6.QtCore import Signal, QUrl, QTimer
 from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import (
     QWidget,
@@ -21,6 +21,7 @@ from PySide6.QtWidgets import (
 
 from src.app.membership_service import MembershipService
 from src.config.settings_manager import AppSettings, SettingsManager
+from src.gui.widgets import PlatformTagsWidget
 from urllib.parse import urlparse
 
 
@@ -60,6 +61,10 @@ class SettingsView(QWidget):
         layout.addWidget(save_button)
         self.setLayout(layout)
 
+        # Attempt automatic authentication on startup if credentials are saved
+        # Defer to next event loop to ensure all signal connections are established
+        QTimer.singleShot(0, self._auto_authenticate_on_startup)
+
     def _setup_ui(self) -> tuple[QGroupBox, QGroupBox, QGroupBox]:
         """Creates and arranges the UI widgets for settings."""
         self._form_layout = QFormLayout()
@@ -77,9 +82,7 @@ class SettingsView(QWidget):
 
         self.membership_status_label = QLabel()
         self.membership_status_label.setStyleSheet("font-weight: 600;")
-        self.membership_allowed_label = QLabel()
-        self.membership_allowed_label.setWordWrap(True)
-        self.membership_allowed_label.setStyleSheet("color: #555555; font-size: 12px;")
+        self.membership_allowed_widget = PlatformTagsWidget()
 
         button_row = QHBoxLayout()
         self.membership_login_button = QPushButton("Entrar")
@@ -100,7 +103,7 @@ class SettingsView(QWidget):
         membership_layout.addRow("", self.save_membership_password_check)
         membership_layout.addRow(button_row)
         membership_layout.addRow("Status:", self.membership_status_label)
-        membership_layout.addRow("Plataformas liberadas:", self.membership_allowed_label)
+        membership_layout.addRow("Plataformas liberadas:", self.membership_allowed_widget)
 
         self._membership_group.setLayout(membership_layout)
 
@@ -423,8 +426,7 @@ class SettingsView(QWidget):
         self.membership_status_label.setText(
             "Assinante" if settings.is_premium_member else "Gratuito"
         )
-        allowed_text = ", ".join(settings.allowed_platforms) if settings.allowed_platforms else "Nenhuma"
-        self.membership_allowed_label.setText(allowed_text)
+        self.membership_allowed_widget.set_platforms(settings.allowed_platforms)
         self.membership_logout_button.setEnabled(
             bool(settings.membership_token) or settings.has_full_permissions
         )
@@ -555,14 +557,22 @@ class SettingsView(QWidget):
         """Opens the membership site in the default browser."""
         QDesktopServices.openUrl(QUrl("https://katomaro.com/store/katomart"))
 
-    def _authenticate_membership(self) -> None:
-        """Authenticates the app user and stores the returned entitlements."""
+    def _authenticate_membership(self, show_errors: bool = True) -> bool:
+        """Authenticates the app user and stores the returned entitlements.
+
+        Args:
+            show_errors: Whether to display error dialogs to the user
+
+        Returns:
+            True if authentication succeeded, False otherwise
+        """
         email = self.membership_email_edit.text().strip()
         password = self.membership_password_edit.text().strip()
 
         if not email or not password:
-            QMessageBox.warning(self, "Dados incompletos", "Informe e-mail e senha para autenticar.")
-            return
+            if show_errors:
+                QMessageBox.warning(self, "Dados incompletos", "Informe e-mail e senha para autenticar.")
+            return False
 
         settings = self._settings_manager.get_settings(include_premium=True)
         service = MembershipService(timeout=settings.timeout_seconds)
@@ -570,8 +580,9 @@ class SettingsView(QWidget):
         try:
             membership_info = service.authenticate(email, password)
         except Exception as exc:  # noqa: BLE001
-            QMessageBox.critical(self, "Falha na autenticação", str(exc))
-            return
+            if show_errors:
+                QMessageBox.critical(self, "Falha na autenticação", str(exc))
+            return False
 
         updated_settings = replace(
             settings,
@@ -588,6 +599,27 @@ class SettingsView(QWidget):
         self.load_settings()
         # self.membership_password_edit.clear() # Cleared by load_settings logic if needed, but we keep if saved
         self.membership_updated.emit()
+        return True
+
+    def _auto_authenticate_on_startup(self) -> None:
+        """Automatically authenticates on startup if credentials are saved.
+
+        This method is called during initialization to provide a seamless experience
+        when users have saved their credentials. Authentication happens silently in
+        the background without showing error dialogs if it fails.
+        """
+        # Check if password saving is enabled and credentials are present
+        if not self.save_membership_password_check.isChecked():
+            return
+
+        email = self.membership_email_edit.text().strip()
+        password = self.membership_password_edit.text().strip()
+
+        if not email or not password:
+            return
+
+        # Attempt silent authentication (no error dialogs)
+        self._authenticate_membership(show_errors=False)
 
     def _clear_membership(self) -> None:
         """Clears membership data from the settings."""
