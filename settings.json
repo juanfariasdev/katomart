@@ -58,5 +58,6 @@
     "ffmpeg_path": "./ffmpeg/bin",
     "bento4_path": "./bento4/bin",
     "lesson_access_delay": 0,
-    "lesson_watch_status_behavior": "none"
+    "lesson_watch_status_behavior": "none",
+    "skip_video_download": false
 }
