@@ -266,6 +266,17 @@ Para obter o token:
                         size=0,
                         duration=0
                     ))
+            elif content_type == "safevideo_video":
+                video_url = lesson_content.get("data")
+                if video_url:
+                    content.videos.append(Video(
+                        video_id=lesson_slug,
+                        url=video_url,
+                        title=details_data.get("title") or details_data.get("name") or "Aula",
+                        order=1,
+                        size=0,
+                        duration=0
+                    ))
             elif content_type:
                 logger.warning(f"Unsupported content type '{content_type}' for lesson {lesson_slug}. Skipping video extraction.")
 
