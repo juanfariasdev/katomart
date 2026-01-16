@@ -36,4 +36,8 @@ dist/
 *.spec
 build.py
 
+# Binaries (symlinks)
+ffmpeg/
+bento4/
+
 credentials.json

@@ -283,6 +283,50 @@ class HotmartDownloader(BaseDownloader):
             logging.error(f"Erro durante o processo de obtenção de chaves: {e}", exc_info=True)
             return None
 
+    def _validate_mp4_file(self, file_path: str) -> bool:
+        """Validates an MP4 file using ffprobe to ensure it's not corrupted."""
+        try:
+            ffprobe_exe = get_executable_path("ffprobe", getattr(self.settings, "ffmpeg_path", None))
+            if not ffprobe_exe:
+                logging.warning("ffprobe não encontrado. Pulando validação do arquivo MP4.")
+                return True  # Assume valid if we can't validate
+            
+            cmd = [
+                ffprobe_exe,
+                '-v', 'error',
+                '-select_streams', 'v:0',
+                '-show_entries', 'stream=codec_type',
+                '-of', 'default=noprint_wrappers=1:nokey=1',
+                file_path
+            ]
+            
+            result = subprocess.run(
+                cmd,
+                check=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                timeout=10
+            )
+            
+            # Check if we got "video" in the output
+            if "video" in result.stdout.lower():
+                logging.debug(f"Validação MP4 bem-sucedida: {file_path}")
+                return True
+            else:
+                logging.error(f"Arquivo MP4 não contém stream de vídeo válido: {file_path}")
+                return False
+                
+        except subprocess.CalledProcessError as e:
+            logging.error(f"Erro ao validar MP4 com ffprobe: {e.stderr}")
+            return False
+        except subprocess.TimeoutExpired:
+            logging.error(f"Timeout ao validar MP4: {file_path}")
+            return False
+        except Exception as e:
+            logging.error(f"Erro inesperado ao validar MP4: {e}")
+            return False
+
     def download_video(self, url: str, session: requests.Session, download_path: Path, extra_props: Optional[Dict[str, Any]] = None) -> bool:
         """
         Downloads a video from a Hotmart embedded player URL.
@@ -475,6 +519,11 @@ class HotmartDownloader(BaseDownloader):
                             logging.error(f"Erro na descriptografia: {e.stderr.decode(errors='replace')}")
                             return False
 
+                    # Log details about decrypted files for diagnostics
+                    for dec_file in decrypted_files:
+                        file_size = os.path.getsize(dec_file) / (1024 * 1024)  # MB
+                        logging.debug(f"Arquivo descriptografado: {os.path.basename(dec_file)} ({file_size:.2f} MB)")
+
                     temp_output_file = str(temp_path / f"{temp_base_name}.mp4")
                     
                     ffmpeg_exe = get_executable_path("ffmpeg", getattr(self.settings, "ffmpeg_path", None))
@@ -482,16 +531,52 @@ class HotmartDownloader(BaseDownloader):
                         logging.error("ffmpeg não encontrado. Verifique se o caminho está configurado corretamente ou se está no PATH.")
                         return False
 
+                    # Build FFmpeg command with explicit stream mapping
                     cmd_merge = [ffmpeg_exe, '-y']
                     for dec_file in decrypted_files:
                         cmd_merge.extend(['-i', dec_file])
-                    cmd_merge.extend(['-c', 'copy', temp_output_file])
+                    
+                    # Explicitly map streams to avoid corruption
+                    # Map video from first input, audio from second (or first if only one file)
+                    if len(decrypted_files) == 1:
+                        # Single file contains both video and audio
+                        cmd_merge.extend(['-c', 'copy', temp_output_file])
+                    elif len(decrypted_files) == 2:
+                        # Separate video and audio files - map explicitly
+                        cmd_merge.extend([
+                            '-map', '0:v:0',  # Video from first file
+                            '-map', '1:a:0',  # Audio from second file
+                            '-c:v', 'copy',   # Copy video codec
+                            '-c:a', 'copy',   # Copy audio codec
+                            temp_output_file
+                        ])
+                    else:
+                        # Multiple files - map all streams
+                        for i in range(len(decrypted_files)):
+                            cmd_merge.extend(['-map', f'{i}'])
+                        cmd_merge.extend(['-c', 'copy', temp_output_file])
 
-                    logging.info(f"Unindo arquivos...")
+                    logging.info(f"Unindo {len(decrypted_files)} arquivo(s) descriptografado(s)...")
+                    logging.debug(f"Comando FFmpeg: {' '.join(cmd_merge)}")
+                    
                     try:
-                        subprocess.run(cmd_merge, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+                        result = subprocess.run(
+                            cmd_merge, 
+                            check=True, 
+                            stdout=subprocess.PIPE, 
+                            stderr=subprocess.PIPE,
+                            text=True
+                        )
+                        if result.stderr:
+                            logging.debug(f"FFmpeg stderr: {result.stderr}")
                     except subprocess.CalledProcessError as e:
-                        logging.error(f"Erro ao unir arquivos: {e.stderr.decode(errors='replace')}")
+                        logging.error(f"Erro ao unir arquivos: {e.stderr}")
+                        logging.error(f"Comando que falhou: {' '.join(cmd_merge)}")
+                        return False
+
+                    # Validate the merged file before moving it
+                    if not self._validate_mp4_file(temp_output_file):
+                        logging.error(f"Arquivo MP4 gerado está corrompido. Abortando download.")
                         return False
 
                     final_output_file = str(download_path) + ".mp4"
