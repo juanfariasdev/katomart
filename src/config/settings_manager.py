@@ -74,6 +74,7 @@ class AppSettings:
     lesson_access_delay: int = 0
     lesson_watch_status_behavior: str = "none"
     skip_video_download: bool = False
+    hotmart_token: str = ""
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> "AppSettings":

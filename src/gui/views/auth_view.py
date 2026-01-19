@@ -2,6 +2,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Callable
 import threading
+import logging
 
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
@@ -116,6 +117,14 @@ class AuthView(QWidget):
             name: handlers.accessor()
             for name, handlers in self._auth_inputs.items()
         }
+
+        # Load saved Hotmart token if available
+        if platform_name.lower() == "hotmart":
+            settings = self._settings_manager.get_settings(include_premium=True)
+            saved_token = getattr(settings, "hotmart_token", "").strip()
+            if saved_token:
+                credentials["token"] = saved_token
+                logging.info("Usando token salvo da Hotmart para autenticação.")
 
         if credentials.get("browser_emulation"):
             confirmation_event = threading.Event()

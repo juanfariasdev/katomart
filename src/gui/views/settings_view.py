@@ -244,14 +244,6 @@ class SettingsView(QWidget):
 
         self.max_concurrent_downloads_spin = QSpinBox()
         self.max_concurrent_downloads_spin.setRange(1, 16)
-        
-        self.max_concurrent_lessons_spin = QSpinBox()
-        self.max_concurrent_lessons_spin.setRange(1, 10)
-        self.max_concurrent_lessons_spin.setToolTip(
-            "Número de aulas que serão baixadas simultaneamente.\n"
-            "Valores maiores aceleram o download mas usam mais recursos.\n"
-            "Recomendado: 1-5. Resume será desabilitado se > 1."
-        )
 
         self.retry_attempts_spin = QSpinBox()
         self.retry_attempts_spin.setRange(0, 10)
@@ -350,10 +342,7 @@ class SettingsView(QWidget):
 
         self._paid_form_layout.addRow("User Agent:", self.user_agent_edit)
         self._paid_form_layout.addRow(
-            "Máximo de Segmentos Concorrentes (por vídeo):", self.max_concurrent_downloads_spin
-        )
-        self._paid_form_layout.addRow(
-            "Máximo de Aulas Concorrentes:", self.max_concurrent_lessons_spin
+            "Máximo de Downloads Concorrentes:", self.max_concurrent_downloads_spin
         )
         self._paid_form_layout.addRow(
             "Quantidade de Retentativas de download:", self.retry_attempts_spin
@@ -444,7 +433,6 @@ class SettingsView(QWidget):
 
         self.user_agent_edit.setText(settings.user_agent)
         self.max_concurrent_downloads_spin.setValue(settings.max_concurrent_segment_downloads)
-        self.max_concurrent_lessons_spin.setValue(getattr(settings, "max_concurrent_lesson_downloads", 1))
         self.retry_attempts_spin.setValue(settings.download_retry_attempts)
         self.lesson_access_delay_spin.setValue(getattr(settings, "lesson_access_delay", 0))
         
@@ -508,7 +496,6 @@ class SettingsView(QWidget):
             download_path=self.download_path_edit.text(),
             video_quality=self.video_quality_combo.currentText(),
             max_concurrent_segment_downloads=self.max_concurrent_downloads_spin.value(),
-            max_concurrent_lesson_downloads=self.max_concurrent_lessons_spin.value(),
             timeout_seconds=self.timeout_spin.value(),
             download_subtitles=self.download_subtitles_check.isChecked(),
             download_podcasts=self.download_podcasts_check.isChecked(),

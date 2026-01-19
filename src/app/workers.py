@@ -7,7 +7,7 @@ import shutil
 import html
 import inspect
 import threading
-from concurrent.futures import ThreadPoolExecutor, as_completed
+
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -32,11 +32,13 @@ class WorkerSignals(QObject):
     - error: tuple (exctype, value, traceback.format_exc())
     - result: object data returned from processing
     - progress: int indicating % progress
+    - lesson_completed: emitted when a lesson finishes downloading
     """
     finished = Signal()
     error = Signal(tuple)
     result = Signal(str)
     progress = Signal(int)
+    lesson_completed = Signal()
     request_auth_confirmation = Signal(object)
 
 
@@ -136,12 +138,7 @@ class DownloadWorker(QRunnable):
         self.selected_courses = selected_courses or []
         self.resume_manager: ResumeManager | None = None
         self.resume_state: Dict[str, Any] | None = None
-        
-        # Parallel download configuration
-        self._max_concurrent_lessons = max(1, getattr(self.settings, "max_concurrent_lesson_downloads", 1))
-        self._progress_lock = threading.Lock()
-        self._lessons_completed = 0
-        self._total_lessons = 0
+        self._cancel_requested = False
 
         if getattr(self.settings, "create_resume_summary", False):
             self.resume_manager = ResumeManager(self.download_dir)
@@ -150,6 +147,11 @@ class DownloadWorker(QRunnable):
                 self.resume_state.setdefault("selection", self.selection)
                 self.resume_state.setdefault("selected_courses", self.selected_courses)
                 self.resume_manager.save_state(self.platform_name, self.resume_state)
+    
+    def request_cancel(self) -> None:
+        """Requests cancellation of the download process."""
+        self._cancel_requested = True
+        logging.info("Cancelamento de download solicitado pelo usuário.")
 
     def _run_with_retries(self, func, description: str, treat_false_as_failure: bool = True):
         """Execute ``func`` with the configured retry policy.
@@ -486,16 +488,6 @@ class DownloadWorker(QRunnable):
                 raise ConnectionError("Download worker requires an authenticated session.")
 
             self._ensure_resume_state(session)
-            
-            # Disable resume when parallel downloads are enabled
-            if self._max_concurrent_lessons > 1:
-                if self.resume_manager:
-                    self.signals.result.emit(
-                        f"⚠️ Downloads paralelos ativados ({self._max_concurrent_lessons} aulas simultâneas). "
-                        "Funcionalidade de retomar download foi desabilitada."
-                    )
-                self.resume_manager = None
-                self.resume_state = None
 
             total_lessons = sum(len(module.get("lessons", [])) for course in self.selection.values() for module in course.get("modules", []))
             self._total_lessons = total_lessons
@@ -534,11 +526,17 @@ class DownloadWorker(QRunnable):
                     self.signals.result.emit(f"  -> Modulo: {module_title}")
 
                     for lesson_index, lesson in enumerate(module.get("lessons", []), start=1):
+                        # Check for cancellation
+                        if self._cancel_requested:
+                            self.signals.result.emit("🛑 Download cancelado pelo usuário.")
+                            return
+                        
                         if lesson.get("download") is False:
                             self.signals.result.emit(f"    - Pulando aula não selecionada para download ou bloqueada: {lesson.get('title', 'Unknown Lesson')}")
                             lessons_processed += 1
                             progress = int((lessons_processed / total_lessons) * 100) if total_lessons > 0 else 0
                             self.signals.progress.emit(progress)
+                            self.signals.lesson_completed.emit()
                             continue
 
                         lesson_key = (
@@ -688,89 +686,43 @@ class DownloadWorker(QRunnable):
                             if getattr(self.settings, "skip_video_download", False):
                                 self.signals.result.emit("    - [CONFIG] Pulando download de vídeos principais (configuração ativa).")
                             else:
-                                # Download videos in parallel if configured
-                                if self._max_concurrent_lessons > 1 and len(lesson_details.videos) > 1:
-                                    self.signals.result.emit(f"    - Baixando {len(lesson_details.videos)} vídeos em paralelo...")
-                                    
-                                    def download_single_video(video, video_index):
-                                        video_order = video.order or video_index
-                                        video_name = f"{video_order}. Aula"
-                                        video_name = truncate_filename_preserve_ext(video_name, getattr(self.settings, 'max_file_name_length', 30))
-                                        video_path = lesson_path / video_name
-                                        logging.info(f"Baixando Vídeo '{video_name}' para '{video_path}'")
-                                        downloader = DownloaderFactory.get_downloader(video.url, self.settings_manager)
-                                        video_key = str(video.video_id or video_order)
+                                for video_index, video in enumerate(lesson_details.videos, start=1):
+                                    video_order = video.order or video_index
+                                    video_name = f"{video_order}. Aula"
+                                    video_name = truncate_filename_preserve_ext(video_name, getattr(self.settings, 'max_file_name_length', 30))
+                                    video_path = lesson_path / video_name
+                                    logging.info(f"Baixando Vídeo '{video_name}' para '{video_path}'")
+                                    downloader = DownloaderFactory.get_downloader(video.url, self.settings_manager)
+                                    video_key = str(video.video_id or video_order)
 
-                                        if self._should_skip_download(lesson_entry, "videos", video_key):
-                                            self.signals.result.emit(f"    - Vídeo já baixado previamente pelo resumo: {video_name}")
-                                            return None
+                                    if self._should_skip_download(lesson_entry, "videos", video_key):
+                                        self.signals.result.emit(
+                                            f"    - Vídeo já baixado previamente pelo resumo: {video_name}"
+                                        )
+                                        continue
 
-                                        try:
-                                            extra_props = getattr(video, 'extra_props', {})
-                                            self._run_with_retries(
-                                                lambda: downloader.download_video(
-                                                    video.url, self.platform.get_session(), video_path, extra_props=extra_props
-                                                ),
-                                                description=f"Download do vídeo '{video_name}'",
-                                            )
-                                            self._mark_resume_status(course_id_str, module_key, lesson_key, "videos", video_key, True)
-                                            self.signals.result.emit(f"    - Vídeo baixado: {video_name}")
-                                            self._maybe_transcribe_video(video_path)
-                                            return video_path
-                                        except Exception:
-                                            self._mark_resume_status(course_id_str, module_key, lesson_key, "videos", video_key, False)
-                                            self.signals.result.emit(f"    - [ERROR] Falha ao baixar vídeo: {video_name}")
-                                            return None
-                                    
-                                    with ThreadPoolExecutor(max_workers=self._max_concurrent_lessons) as executor:
-                                        futures = {
-                                            executor.submit(download_single_video, video, idx): video 
-                                            for idx, video in enumerate(lesson_details.videos, start=1)
-                                        }
-                                        
-                                        for future in as_completed(futures):
-                                            result = future.result()
-                                            if result:
-                                                last_downloaded_video_path = result
-                                else:
-                                    # Sequential download (original behavior)
-                                    for video_index, video in enumerate(lesson_details.videos, start=1):
-                                        video_order = video.order or video_index
-                                        video_name = f"{video_order}. Aula"
-                                        video_name = truncate_filename_preserve_ext(video_name, getattr(self.settings, 'max_file_name_length', 30))
-                                        video_path = lesson_path / video_name
-                                        logging.info(f"Baixando Vídeo '{video_name}' para '{video_path}'")
-                                        downloader = DownloaderFactory.get_downloader(video.url, self.settings_manager)
-                                        video_key = str(video.video_id or video_order)
+                                    try:
+                                        extra_props = getattr(video, 'extra_props', {})
 
-                                        if self._should_skip_download(lesson_entry, "videos", video_key):
-                                            self.signals.result.emit(
-                                                f"    - Vídeo já baixado previamente pelo resumo: {video_name}"
-                                            )
-                                            continue
-
-                                        try:
-                                            extra_props = getattr(video, 'extra_props', {})
-
-                                            self._run_with_retries(
-                                                lambda: downloader.download_video(
-                                                    video.url, self.platform.get_session(), video_path, extra_props=extra_props
-                                                ),
-                                                description=f"Download do vídeo '{video_name}'",
-                                            )
-                                            last_downloaded_video_path = video_path
-                                            self._mark_resume_status(
-                                                course_id_str, module_key, lesson_key, "videos", video_key, True
-                                            )
-                                            self.signals.result.emit(f"    - Vídeo baixado: {video_name}")
-                                            self._maybe_transcribe_video(video_path)
-                                        except Exception:
-                                            self._mark_resume_status(
-                                                course_id_str, module_key, lesson_key, "videos", video_key, False
-                                            )
-                                            self.signals.result.emit(
-                                                f"    - [ERROR] Falha ao baixar vídeo: {video_name}"
-                                            )
+                                        self._run_with_retries(
+                                            lambda: downloader.download_video(
+                                                video.url, self.platform.get_session(), video_path, extra_props=extra_props
+                                            ),
+                                            description=f"Download do vídeo '{video_name}'",
+                                        )
+                                        last_downloaded_video_path = video_path
+                                        self._mark_resume_status(
+                                            course_id_str, module_key, lesson_key, "videos", video_key, True
+                                        )
+                                        self.signals.result.emit(f"    - Vídeo baixado: {video_name}")
+                                        self._maybe_transcribe_video(video_path)
+                                    except Exception:
+                                        self._mark_resume_status(
+                                            course_id_str, module_key, lesson_key, "videos", video_key, False
+                                        )
+                                        self.signals.result.emit(
+                                            f"    - [ERROR] Falha ao baixar vídeo: {video_name}"
+                                        )
 
                             for attachment_index, attachment in enumerate(lesson_details.attachments, start=1):
                                 attachment_order = attachment.order or attachment_index
@@ -898,6 +850,7 @@ class DownloadWorker(QRunnable):
                         lessons_processed += 1
                         progress = int((lessons_processed / total_lessons) * 100) if total_lessons > 0 else 0
                         self.signals.progress.emit(progress)
+                        self.signals.lesson_completed.emit()
 
                         delay_setting = getattr(self.settings, "lesson_access_delay", 0)
                         if delay_setting != 0:

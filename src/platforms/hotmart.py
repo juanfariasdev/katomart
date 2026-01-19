@@ -87,6 +87,7 @@ class HotmartPlatform(BasePlatform):
     """Implements the specific scraping logic for Hotmart."""
     def __init__(self, api_service: ApiService, settings_manager: SettingsManager):
         super().__init__(api_service, settings_manager)
+        self._settings_manager = settings_manager  # Store for token persistence
         self._token_fetcher = HotmartTokenFetcher()
         self.course_codes: Dict[str, str] = {}
 
@@ -113,6 +114,8 @@ Para usuários gratuitos: Como obter o token da Hotmart?:
         self.credentials = credentials
         token = self.resolve_access_token(credentials, self._exchange_credentials_for_token)
         self._configure_session(token)
+        # Save token for future use
+        self._save_token(token)
 
     def _configure_session(self, token: str) -> None:
         self._session = requests.Session()
@@ -122,9 +125,31 @@ Para usuários gratuitos: Como obter o token da Hotmart?:
             "Origin": "https://consumer.hotmart.com",
             "Referer": "https://consumer.hotmart.com/",
         })
+    
+    def _save_token(self, token: str) -> None:
+        """Saves the Hotmart token to settings for future sessions."""
+        from dataclasses import replace
+        current_settings = self._settings_manager.get_settings(include_premium=True)
+        updated_settings = replace(current_settings, hotmart_token=token)
+        self._settings_manager.save_settings(updated_settings)
+        # Reload settings to update cached version
+        self._settings = self._settings_manager.get_settings()
+        logging.info("Token da Hotmart salvo com sucesso para uso futuro.")
+    
+    def _clear_saved_token(self) -> None:
+        """Clears the saved Hotmart token."""
+        from dataclasses import replace
+        current_settings = self._settings_manager.get_settings(include_premium=True)
+        updated_settings = replace(current_settings, hotmart_token="")
+        self._settings_manager.save_settings(updated_settings)
+        self._settings = self._settings_manager.get_settings()
+        logging.info("Token da Hotmart limpo.")
 
     def _exchange_credentials_for_token(self, username: str, password: str, credentials: Dict[str, Any]) -> str:
         """Automates the Hotmart login flow to capture the bearer token."""
+        # Clear saved token since we're re-authenticating
+        self._clear_saved_token()
+        
         use_browser_emulation = bool(credentials.get("browser_emulation"))
         confirmation_event = credentials.get("manual_auth_confirmation")
         custom_ua = self._settings.user_agent

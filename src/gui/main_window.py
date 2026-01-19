@@ -221,12 +221,23 @@ class MainWindow(QMainWindow):
             return
 
         selection = json.loads(selection_json)
+        
+        # Calculate total lessons
+        total_lessons = sum(
+            len(module.get("lessons", []))
+            for course in selection.values()
+            for module in course.get("modules", [])
+        )
             
         self._stacked_widget.setCurrentWidget(self.progress_view)
         if resume_state:
             self.progress_view.log_message("Retomando downloads da sessão anterior...")
         else:
             self.progress_view.log_message("Iniciando download...")
+        
+        # Setup progress tracking
+        self.progress_view.set_total_lessons(total_lessons)
+        self.progress_view.set_download_active(True)
 
         download_dir = self._settings_manager.get_settings().download_path
         worker = DownloadWorker(
@@ -240,10 +251,20 @@ class MainWindow(QMainWindow):
         )
         worker.signals.progress.connect(self.progress_view.set_progress)
         worker.signals.result.connect(self.progress_view.log_message)
+        worker.signals.lesson_completed.connect(self.progress_view.increment_completed_lessons)
         worker.signals.error.connect(self._handle_worker_error)
         worker.signals.request_auth_confirmation.connect(self._handle_auth_confirmation_request)
-        worker.signals.finished.connect(lambda: self.progress_view.log_message("Worker finished."))
+        worker.signals.finished.connect(self._on_download_finished)
+        
+        # Connect cancel button
+        self.progress_view.cancel_requested.connect(worker.request_cancel)
+        
         self._thread_pool.start(worker)
+    
+    def _on_download_finished(self) -> None:
+        """Called when download worker finishes."""
+        self.progress_view.log_message("Worker finished.")
+        self.progress_view.set_download_active(False)
 
     def _handle_auth_confirmation_request(self, confirmation_event: Any) -> None:
         """Handles a request from the worker to confirm manual authentication."""
